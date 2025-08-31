@@ -2,6 +2,7 @@
 #define SOLVER_H
 
 #include "structures.h"
+#include "neighbourhood.h"
 #include <chrono>
 
 /**
