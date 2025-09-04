@@ -8,7 +8,7 @@
 #include <numeric>
 #include <algorithm>
 
-#include "structures.h"
+ #include "structures.h"
 #include "io_handler.h" 
 
 using namespace std;
