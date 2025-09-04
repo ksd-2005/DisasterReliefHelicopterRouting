@@ -48,7 +48,7 @@ double computeObjective(const Solution & sol, const ProblemData & data) {
 }
 
 // Simulated Annealing: maximize objective value.
-long long simulated_annealing(Solution &startState, const ProblemData & data) {
+double simulated_annealing(Solution &startState, const ProblemData & data) {
     // Initialize random generator.
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -57,7 +57,7 @@ long long simulated_annealing(Solution &startState, const ProblemData & data) {
     double T0 = 1000.0;
     double T = T0;
     double decay_rate = 0.995;
-    int maxIterations = 10000;
+    int maxIterations = 1000000;
     
     // Current state and its objective.
     Solution currentState = startState;
@@ -102,5 +102,5 @@ long long simulated_annealing(Solution &startState, const ProblemData & data) {
     startState = bestState;
     
     // You may return best objective value in some integer form.
-    return static_cast<long long>(bestObj);
+    return (bestObj);
 }
