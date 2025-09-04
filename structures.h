@@ -63,11 +63,16 @@ struct Trip {
     int perishable_food_pickup;
     int other_supplies_pickup;
     vector<Drop> drops;
+    double trip_distance;
+    double trip_cost;
 };
 
 struct HelicopterPlan {
     int helicopter_id;
     vector<Trip> trips;
+    double total_delivered_value;
+    double total_trip_cost;
+    double objective_value;
 };
 
 using Solution = vector<HelicopterPlan>;
