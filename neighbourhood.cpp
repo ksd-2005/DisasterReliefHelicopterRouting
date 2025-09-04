@@ -5,6 +5,7 @@
 #include "structures.h"
 #include <random>
 #include "neighbourhood.h"
+
 Solution reorder_visits(Solution & HelicopterPlans, const ProblemData & problemData) {
     Solution reorderedPlans = HelicopterPlans; // Create a copy to store reordered plans
     for (auto & helicopterPlan : reorderedPlans) {
