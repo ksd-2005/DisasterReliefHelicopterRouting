@@ -278,7 +278,7 @@ Solution solve(const ProblemData& problem) {
     } // end for each helicopter
 
     cout << "Greedy validated construction complete. Generated solution with " << solution.size() << " helicopter plans." << endl;
-
+    cout<<"greedy objective: "<<computeObjective(solution,problem)<<endl;
     // Run simulated annealing starting from this valid start state (optional)
     double final_obj_simulated_annealing = simulated_annealing(solution, problem);
     cout << "Simulated annealing returned objective: " << final_obj_simulated_annealing << endl;

@@ -1,6 +1,7 @@
 #include <random>
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include "structures.h"
 #include "neighbourhood.h"
 
@@ -53,12 +54,22 @@ double simulated_annealing(Solution &startState, const ProblemData & data) {
     std::random_device rd;
     std::mt19937 gen(rd());
     
-    // Settings: initial temperature, decay rate, max iterations.
+    // Settings: initial temperature and decay rate.
     double T0 = 1000.0;
     double T = T0;
     double decay_rate = 0.995;
-    int maxIterations = 1000000;
     
+    // Time-based stopping: run up to 90% of data.time_limit_minutes.
+    using clock = std::chrono::steady_clock;
+    auto t_start = clock::now();
+    double minutes = data.time_limit_minutes;
+    if (minutes <= 0.0) {
+        // Safe fallback: if time limit is not set, run for 1 second.
+        minutes = 1.0 / 60.0;
+    }
+    double allowed_seconds = minutes * 0.9 * 60.0; // 90% of minutes -> seconds
+    auto t_end = t_start + std::chrono::duration<double>(allowed_seconds);
+
     // Current state and its objective.
     Solution currentState = startState;
     double currentObj = computeObjective(currentState, data);
@@ -67,13 +78,13 @@ double simulated_annealing(Solution &startState, const ProblemData & data) {
     double bestObj = currentObj;
     
     std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
-    
-    for (int iter = 0; iter < maxIterations; iter++) {
-        // Generate a neighbour. You can choose any neighbourhood function.
-        // For example, use move_visit neighbourhood.
+
+    // Time-driven loop (instead of fixed maxIterations)
+    while (clock::now() < t_end) {
+        // Generate a neighbour using your neighbourhood function.
         Solution neighbour = get_best_neighbor(currentState, data, currentObj);
         double neighbourObj = computeObjective(neighbour, data);
-        
+        //std::cout<< neighbourObj<< std::endl;
         // If neighbour is better, accept.
         if (neighbourObj > currentObj) {
             currentState = neighbour;
@@ -82,25 +93,25 @@ double simulated_annealing(Solution &startState, const ProblemData & data) {
                 bestState = currentState;
                 bestObj = currentObj;
             }
+            // cout<<"Best obj than current:"<<bestObj<<endl;
         } else {
             // Accept with probability exp((neighbourObj - currentObj)/T)
-            double acceptanceProb = exp((neighbourObj - currentObj) / T);
+            double acceptanceProb = std::exp((neighbourObj - currentObj) / T);
             double randomVal = uniform_dist(gen);
             if (randomVal < acceptanceProb) {
                 currentState = neighbour;
                 currentObj = neighbourObj;
+                // cout<<"Took lower value:"<<currentObj<<endl;
             }
         }
         
-        // Update temperature
+        // Update temperature (per iteration)
         T *= decay_rate;
         if (T < 1e-6)
             T = 1e-6;
     }
     
-    // Optionally, update startState with best solution.
+    // Update startState with best solution found.
     startState = bestState;
-    
-    // You may return best objective value in some integer form.
-    return (bestObj);
+    return bestObj;
 }
