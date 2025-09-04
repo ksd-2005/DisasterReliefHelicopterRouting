@@ -1,13 +1,13 @@
 # Compiler and flags
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -O2
+CXXFLAGS = -std=c++17 -Wall -O3 -g
 
 # Executable names
 EXEC = main
 CHECKER_EXEC = format_checker
 
 # Source files for the main solver
-SRCS = main.cpp io_handler.cpp solver.cpp
+SRCS = main.cpp io_handler.cpp solver.cpp simulated_annealing.cpp neighbourhood.cpp
 
 # Source file for the checker
 CHECKER_SRCS = format_checker.cpp
@@ -33,7 +33,7 @@ $(CHECKER_EXEC): $(CHECKER_OBJS) io_handler.o
 
 # Generic rule to compile .cpp to .o
 # The headers are dependencies for all object files.
-%.o: %.cpp structures.h
+%.o: %.cpp structures.h neighbourhood.h simulated_annealing.h io_handler.h solver.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Clean up build files
