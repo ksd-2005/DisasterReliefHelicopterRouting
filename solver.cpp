@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <numeric>
 #include "simulated_annealing.h"
+#include "neighbourhood.h"
 using namespace std;
 
 static double computeTripDistanceFromHome(const Point &home, const vector<Drop> &drops, const ProblemData &data) {
@@ -278,7 +279,7 @@ Solution solve(const ProblemData& problem) {
     } // end for each helicopter
 
     cout << "Greedy validated construction complete. Generated solution with " << solution.size() << " helicopter plans." << endl;
-    cout<<"greedy objective: "<<computeObjective(solution,problem)<<endl;
+    cout<<"greedy objective: "<<compute_objective(solution,problem,nullptr)<<endl;
     // Run simulated annealing starting from this valid start state (optional)
     double final_obj_simulated_annealing = simulated_annealing(solution, problem);
     cout << "Simulated annealing returned objective: " << final_obj_simulated_annealing << endl;

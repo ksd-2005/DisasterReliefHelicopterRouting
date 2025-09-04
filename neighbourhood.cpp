@@ -6,7 +6,8 @@
 #include <random>
 #include <set>
 #include <vector>
-
+#include <array>
+#include <iostream>
 double compute_trip_dist(const Trip &trip, const Point &home,
                          const ProblemData &problemData) {
     if (trip.drops.empty())
@@ -43,6 +44,71 @@ double compute_village_value(const std::vector<int> &delivered,
     }
     double other_value = std::min(other, K_other) * data.packages[2].value;
     return food_value + other_value;
+}
+
+double compute_max_village_value(const ProblemData &data, int pop) {
+    double max_food_value = 9.0 * pop * data.packages[1].value; // prefer perishable
+    double max_other_value = 1.0 * pop * data.packages[2].value;
+    return max_food_value + max_other_value;
+}
+
+// ---------- new helper: validate single helicopter plan ----------
+static bool validate_plan_for_heli(const HelicopterPlan &plan,
+                                   const ProblemData &problemData) {
+    if (plan.helicopter_id < 1 ||
+        plan.helicopter_id > static_cast<int>(problemData.helicopters.size()))
+        return false;
+    const Helicopter &heli = problemData.helicopters[plan.helicopter_id - 1];
+    const Point &home = problemData.cities[heli.home_city_id - 1];
+
+    double heli_total_dist = 0.0;
+    for (const auto &trip : plan.trips) {
+        int sum_drops[3] = {0, 0, 0};
+        for (const auto &drop : trip.drops) {
+            if (drop.village_id < 1 ||
+                drop.village_id > static_cast<int>(problemData.villages.size()))
+                return false;
+            sum_drops[0] += drop.dry_food;
+            sum_drops[1] += drop.perishable_food;
+            sum_drops[2] += drop.other_supplies;
+        }
+        if (sum_drops[0] != trip.dry_food_pickup ||
+            sum_drops[1] != trip.perishable_food_pickup ||
+            sum_drops[2] != trip.other_supplies_pickup)
+            return false;
+
+        double trip_weight = trip.dry_food_pickup * problemData.packages[0].weight +
+                             trip.perishable_food_pickup * problemData.packages[1].weight +
+                             trip.other_supplies_pickup * problemData.packages[2].weight;
+        if (trip_weight > heli.weight_capacity + 1e-9) return false;
+
+        double trip_dist = compute_trip_dist(trip, home, problemData);
+        if (trip_dist > heli.distance_capacity + 1e-9) return false;
+
+        heli_total_dist += trip_dist;
+    }
+    if (heli_total_dist > problemData.d_max + 1e-9) return false;
+    return true;
+}
+
+// ---------- small helper: compute full village_delivered for a solution ----------
+static std::vector<std::vector<int>> compute_village_delivered(const Solution &sol,
+                                                               const ProblemData &data) {
+    std::vector<std::vector<int>> village_delivered(data.villages.size(),
+                                                    std::vector<int>(3, 0));
+    for (const auto &plan : sol) {
+        for (const auto &trip : plan.trips) {
+            for (const auto &drop : trip.drops) {
+                int vid = drop.village_id - 1;
+                if (vid >= 0 && static_cast<size_t>(vid) < village_delivered.size()) {
+                    village_delivered[vid][0] += drop.dry_food;
+                    village_delivered[vid][1] += drop.perishable_food;
+                    village_delivered[vid][2] += drop.other_supplies;
+                }
+            }
+        }
+    }
+    return village_delivered;
 }
 
 double compute_objective(const Solution &sol, const ProblemData &data,
@@ -171,6 +237,7 @@ Solution reorder_visits(const Solution &HelicopterPlans,
 
         if (new_dist > heli.distance_capacity ||
             new_heli_total > problemData.d_max) {
+                //////std::cout<<"Wrong state failed"<<std::endl;
             std::reverse(trip.drops.begin() + i,
                          trip.drops.begin() + j + 1); // Revert
             continue;
@@ -179,6 +246,8 @@ Solution reorder_visits(const Solution &HelicopterPlans,
         double delta_cost = heli.alpha * delta_dist;
         double delta_obj = -delta_cost;
         if (!improve_only || delta_obj > 0) { // Better objective (lower cost)
+            //std::cout<<compute_objective(reorderedPlans,problemData)<<" "<<current_obj<<std::endl;
+             ////std::cout<<"cmae :: reorder_visits"<<std::endl;
             return reorderedPlans;
         }
         std::reverse(trip.drops.begin() + i,
@@ -197,55 +266,30 @@ Solution reallocate_packages(const Solution &HelicopterPlans,
     for (int attempt = 0; attempt < 5; ++attempt) {
         double donationFactor = factor_dist(gen);
         Solution reallocatedPlans = HelicopterPlans;
-        std::vector<std::vector<int>> village_delivered(
-            problemData.villages.size(), std::vector<int>(3, 0));
-        for (const auto &plan : HelicopterPlans) {
-            for (const auto &trip : plan.trips) {
-                for (const auto &drop : trip.drops) {
-                    int v = drop.village_id - 1;
-                    village_delivered[v][0] += drop.dry_food;
-                    village_delivered[v][1] += drop.perishable_food;
-                    village_delivered[v][2] += drop.other_supplies;
-                }
-            }
-        }
 
-        bool changed = false;
-        for (auto &plan : reallocatedPlans) {
-            const Helicopter &heli =
-                problemData.helicopters[plan.helicopter_id - 1];
+        for (size_t p = 0; p < reallocatedPlans.size(); ++p) {
+            auto &plan = reallocatedPlans[p];
+            const Helicopter &heli = problemData.helicopters[plan.helicopter_id - 1];
             const Point home = problemData.cities[heli.home_city_id - 1];
-            for (auto &trip : plan.trips) {
-                if (trip.drops.empty())
-                    continue;
 
-                std::vector<Drop> old_drops = trip.drops;
+            for (size_t t = 0; t < plan.trips.size(); ++t) {
+                Trip tripCopy = plan.trips[t];
+                if (tripCopy.drops.empty()) continue;
+
                 std::map<int, std::array<int, 3>> old_contrib;
-                for (const auto &drop : old_drops) {
+                for (const auto &drop : tripCopy.drops) {
                     auto &c = old_contrib[drop.village_id];
                     c[0] += drop.dry_food;
                     c[1] += drop.perishable_food;
                     c[2] += drop.other_supplies;
                 }
-                std::set<int> affected;
-                for (const auto &kv : old_contrib)
-                    affected.insert(kv.first);
-
-                double old_capped_sum = 0.0;
-                for (int vid : affected) {
-                    int v = vid - 1;
-                    old_capped_sum += compute_village_value(
-                        village_delivered[v], problemData,
-                        problemData.villages[v].population);
-                }
 
                 size_t farIndex = 0;
-                double maxDist = 0.0;
-                for (size_t i = 0; i < trip.drops.size(); ++i) {
-                    int vid = trip.drops[i].village_id;
-                    const Point &villagePoint =
-                        problemData.villages[vid - 1].coords;
-                    double d = distance(home, villagePoint);
+                double maxDist = -1.0;
+                for (size_t i = 0; i < tripCopy.drops.size(); ++i) {
+                    int vid = tripCopy.drops[i].village_id;
+                    const Point &vpt = problemData.villages[vid - 1].coords;
+                    double d = distance(home, vpt);
                     if (d > maxDist) {
                         maxDist = d;
                         farIndex = i;
@@ -253,153 +297,103 @@ Solution reallocate_packages(const Solution &HelicopterPlans,
                 }
 
                 int totalDonationFood = 0;
-                std::vector<int> donationFood(trip.drops.size(), 0);
-                for (size_t i = 0; i < trip.drops.size(); ++i) {
-                    if (i == farIndex)
-                        continue;
-                    int currentFood =
-                        trip.drops[i].dry_food + trip.drops[i].perishable_food;
+                std::vector<int> donationFood(tripCopy.drops.size(), 0);
+                for (size_t i = 0; i < tripCopy.drops.size(); ++i) {
+                    if (i == farIndex) continue;
+                    int currentFood = tripCopy.drops[i].dry_food + tripCopy.drops[i].perishable_food;
                     int donate = static_cast<int>(donationFactor * currentFood);
                     donationFood[i] = donate;
                     totalDonationFood += donate;
                 }
 
-                int farVillageId = trip.drops[farIndex].village_id;
-                int farCapFood =
-                    problemData.villages[farVillageId - 1].population * 9;
-                int currentFarFood = trip.drops[farIndex].dry_food +
-                                     trip.drops[farIndex].perishable_food;
-                int gapFood = (farCapFood > currentFarFood)
-                                  ? (farCapFood - currentFarFood)
-                                  : 0;
+                int farVillageId = tripCopy.drops[farIndex].village_id;
+                int farCapFood = problemData.villages[farVillageId - 1].population * 9;
+                int currentFarFood = tripCopy.drops[farIndex].dry_food + tripCopy.drops[farIndex].perishable_food;
+                int gapFood = std::max(0, farCapFood - currentFarFood);
                 int actualDonationFood = std::min(totalDonationFood, gapFood);
 
                 if (actualDonationFood > 0 && totalDonationFood > 0) {
-                    for (size_t i = 0; i < trip.drops.size(); ++i) {
-                        if (i == farIndex)
-                            continue;
+                    for (size_t i = 0; i < tripCopy.drops.size(); ++i) {
+                        if (i == farIndex) continue;
                         if (donationFood[i] > 0) {
                             int removal = static_cast<int>(std::round(
-                                donationFood[i] *
-                                (actualDonationFood /
-                                 static_cast<double>(totalDonationFood))));
-                            int currentFood = trip.drops[i].dry_food +
-                                              trip.drops[i].perishable_food;
+                                donationFood[i] * (actualDonationFood / static_cast<double>(totalDonationFood))));
+                            int currentFood = tripCopy.drops[i].dry_food + tripCopy.drops[i].perishable_food;
                             if (currentFood > 0) {
-                                double ratioDry =
-                                    trip.drops[i].dry_food /
-                                    static_cast<double>(currentFood);
-                                int removeDry = static_cast<int>(
-                                    std::round(removal * ratioDry));
+                                double ratioDry = tripCopy.drops[i].dry_food / static_cast<double>(currentFood);
+                                int removeDry = static_cast<int>(std::round(removal * ratioDry));
                                 int removePerc = removal - removeDry;
-                                trip.drops[i].dry_food -= removeDry;
-                                trip.drops[i].perishable_food -= removePerc;
-                                if (trip.drops[i].dry_food < 0)
-                                    trip.drops[i].dry_food = 0;
-                                if (trip.drops[i].perishable_food < 0)
-                                    trip.drops[i].perishable_food = 0;
+                                tripCopy.drops[i].dry_food = std::max(0, tripCopy.drops[i].dry_food - removeDry);
+                                tripCopy.drops[i].perishable_food = std::max(0, tripCopy.drops[i].perishable_food - removePerc);
                             }
                         }
                     }
                     if (currentFarFood > 0) {
-                        double ratioDryFar =
-                            trip.drops[farIndex].dry_food /
-                            static_cast<double>(currentFarFood);
-                        int addDry = static_cast<int>(
-                            std::round(actualDonationFood * ratioDryFar));
+                        double ratioDryFar = tripCopy.drops[farIndex].dry_food / static_cast<double>(currentFarFood);
+                        int addDry = static_cast<int>(std::round(actualDonationFood * ratioDryFar));
                         int addPerc = actualDonationFood - addDry;
-                        trip.drops[farIndex].dry_food += addDry;
-                        trip.drops[farIndex].perishable_food += addPerc;
+                        tripCopy.drops[farIndex].dry_food += addDry;
+                        tripCopy.drops[farIndex].perishable_food += addPerc;
                     } else {
-                        trip.drops[farIndex].dry_food += actualDonationFood;
+                        tripCopy.drops[farIndex].dry_food += actualDonationFood;
                     }
                 }
 
                 int totalDonationOther = 0;
-                std::vector<int> donationOther(trip.drops.size(), 0);
-                for (size_t i = 0; i < trip.drops.size(); ++i) {
-                    if (i == farIndex)
-                        continue;
-                    int currentOther = trip.drops[i].other_supplies;
-                    int donate =
-                        static_cast<int>(donationFactor * currentOther);
+                std::vector<int> donationOther(tripCopy.drops.size(), 0);
+                for (size_t i = 0; i < tripCopy.drops.size(); ++i) {
+                    if (i == farIndex) continue;
+                    int currentOther = tripCopy.drops[i].other_supplies;
+                    int donate = static_cast<int>(donationFactor * currentOther);
                     donationOther[i] = donate;
                     totalDonationOther += donate;
                 }
-                int farCapOther =
-                    problemData.villages[farVillageId - 1].population * 1;
-                int currentFarOther = trip.drops[farIndex].other_supplies;
-                int gapOther = (farCapOther > currentFarOther)
-                                   ? (farCapOther - currentFarOther)
-                                   : 0;
-                int actualDonationOther =
-                    std::min(totalDonationOther, gapOther);
+                int farCapOther = problemData.villages[farVillageId - 1].population * 1;
+                int currentFarOther = tripCopy.drops[farIndex].other_supplies;
+                int gapOther = std::max(0, farCapOther - currentFarOther);
+                int actualDonationOther = std::min(totalDonationOther, gapOther);
 
                 if (actualDonationOther > 0 && totalDonationOther > 0) {
-                    for (size_t i = 0; i < trip.drops.size(); ++i) {
-                        if (i == farIndex)
-                            continue;
+                    for (size_t i = 0; i < tripCopy.drops.size(); ++i) {
+                        if (i == farIndex) continue;
                         if (donationOther[i] > 0) {
-                            int removal = static_cast<int>(std::round(
-                                donationOther[i] *
-                                (actualDonationOther /
-                                 static_cast<double>(totalDonationOther))));
-                            trip.drops[i].other_supplies -= removal;
-                            if (trip.drops[i].other_supplies < 0)
-                                trip.drops[i].other_supplies = 0;
+                            int removal = static_cast<int>(std::round(donationOther[i] * (actualDonationOther / static_cast<double>(totalDonationOther))));
+                            tripCopy.drops[i].other_supplies = std::max(0, tripCopy.drops[i].other_supplies - removal);
                         }
                     }
-                    trip.drops[farIndex].other_supplies += actualDonationOther;
+                    tripCopy.drops[farIndex].other_supplies += actualDonationOther;
                 }
 
-                // Compute new contributions
-                std::map<int, std::array<int, 3>> new_contrib;
-                for (const auto &drop : trip.drops) {
-                    auto &c = new_contrib[drop.village_id];
-                    c[0] += drop.dry_food;
-                    c[1] += drop.perishable_food;
-                    c[2] += drop.other_supplies;
+                tripCopy.dry_food_pickup = 0;
+                tripCopy.perishable_food_pickup = 0;
+                tripCopy.other_supplies_pickup = 0;
+                for (const auto &drop : tripCopy.drops) {
+                    tripCopy.dry_food_pickup += drop.dry_food;
+                    tripCopy.perishable_food_pickup += drop.perishable_food;
+                    tripCopy.other_supplies_pickup += drop.other_supplies;
                 }
 
-                double new_capped_sum = 0.0;
-                for (int vid : affected) {
-                    int v = vid - 1;
-                    std::array<int, 3> temp = {
-                        village_delivered[v][0] - old_contrib[vid][0] +
-                            new_contrib[vid][0],
-                        village_delivered[v][1] - old_contrib[vid][1] +
-                            new_contrib[vid][1],
-                        village_delivered[v][2] - old_contrib[vid][2] +
-                            new_contrib[vid][2]};
-                    new_capped_sum += compute_village_value(
-                        {temp[0], temp[1], temp[2]}, problemData,
-                        problemData.villages[v].population);
+                HelicopterPlan planCopy = plan;
+                planCopy.trips[t] = tripCopy;
+
+                if (!validate_plan_for_heli(planCopy, problemData)) {
+                    continue;
                 }
 
-                double delta = new_capped_sum - old_capped_sum;
-                if (!improve_only || delta > 0) {
-                    changed = true;
-                    for (int vid : affected) {
-                        int v = vid - 1;
-                        village_delivered[v][0] = village_delivered[v][0] -
-                                                  old_contrib[vid][0] +
-                                                  new_contrib[vid][0];
-                        village_delivered[v][1] = village_delivered[v][1] -
-                                                  old_contrib[vid][1] +
-                                                  new_contrib[vid][1];
-                        village_delivered[v][2] = village_delivered[v][2] -
-                                                  old_contrib[vid][2] +
-                                                  new_contrib[vid][2];
-                    }
+                reallocatedPlans[p] = planCopy;
+                bool valid;
+                double obj = compute_objective(reallocatedPlans, problemData, &valid);
+                if (valid && (!improve_only || obj > current_obj)) {
+                    //std::cout<<obj<<" "<<current_obj<<std::endl;
+                     ////std::cout<<"cmae :: reallocate_packages"<<std::endl;
+                    return reallocatedPlans;
                 } else {
-                    trip.drops = std::move(old_drops);
+                    reallocatedPlans[p] = plan;
                 }
-            }
-        }
-        if (changed) {
-            return reallocatedPlans;
-        }
-    }
+            } // end trips
+        } // end plans
+    } // end attempts
+
     return HelicopterPlans;
 }
 
@@ -425,11 +419,6 @@ Solution move_visit(const Solution &HelicopterPlans,
         const Helicopter &heli =
             problemData.helicopters[plan.helicopter_id - 1];
         const Point home = problemData.cities[heli.home_city_id - 1];
-
-        double heli_total_dist = 0.0;
-        for (const auto &trip : plan.trips) {
-            heli_total_dist += compute_trip_dist(trip, home, problemData);
-        }
 
         struct TripLoad {
             size_t tripIndex;
@@ -495,66 +484,49 @@ Solution move_visit(const Solution &HelicopterPlans,
         std::uniform_int_distribution<size_t> dropDist(
             0, sourceTrip.drops.size() - 1);
         size_t dropIndex = dropDist(gen);
+        if (dropIndex >= sourceTrip.drops.size()) continue;
 
-        double old_dist_s = sourceIt->distanceLoad;
-        double old_dist_t = targetIt->distanceLoad;
+        // operate by copying selected drop to make revert easy
+        Drop selectedDrop = sourceTrip.drops[dropIndex];
 
-        double old_weight_s = sourceIt->weightLoad;
-        double old_weight_t = targetIt->weightLoad;
+        // mutate copies first
+        Trip sourceCopy = sourceTrip;
+        Trip targetCopy = targetTrip;
 
-        Drop selectedDrop = std::move(sourceTrip.drops[dropIndex]);
-        int df = selectedDrop.dry_food;
-        int pf = selectedDrop.perishable_food;
-        int os = selectedDrop.other_supplies;
-        sourceTrip.dry_food_pickup -= df;
-        sourceTrip.perishable_food_pickup -= pf;
-        sourceTrip.other_supplies_pickup -= os;
-        targetTrip.dry_food_pickup += df;
-        targetTrip.perishable_food_pickup += pf;
-        targetTrip.other_supplies_pickup += os;
-        sourceTrip.drops.erase(sourceTrip.drops.begin() + dropIndex);
-        targetTrip.drops.push_back(std::move(selectedDrop));
+        // remove drop from sourceCopy, add to targetCopy
+        sourceCopy.drops.erase(sourceCopy.drops.begin() + dropIndex);
+        sourceCopy.dry_food_pickup -= selectedDrop.dry_food;
+        sourceCopy.perishable_food_pickup -= selectedDrop.perishable_food;
+        sourceCopy.other_supplies_pickup -= selectedDrop.other_supplies;
 
-        double new_dist_s = compute_trip_dist(sourceTrip, home, problemData);
-        double new_dist_t = compute_trip_dist(targetTrip, home, problemData);
-        double delta_dist = new_dist_s + new_dist_t - old_dist_s - old_dist_t;
-        double new_heli_total = heli_total_dist + delta_dist;
+        targetCopy.drops.push_back(selectedDrop);
+        targetCopy.dry_food_pickup += selectedDrop.dry_food;
+        targetCopy.perishable_food_pickup += selectedDrop.perishable_food;
+        targetCopy.other_supplies_pickup += selectedDrop.other_supplies;
 
-        double new_weight_s =
-            sourceTrip.dry_food_pickup * problemData.packages[0].weight +
-            sourceTrip.perishable_food_pickup * problemData.packages[1].weight +
-            sourceTrip.other_supplies_pickup * problemData.packages[2].weight;
-        double new_weight_t =
-            targetTrip.dry_food_pickup * problemData.packages[0].weight +
-            targetTrip.perishable_food_pickup * problemData.packages[1].weight +
-            targetTrip.other_supplies_pickup * problemData.packages[2].weight;
+        HelicopterPlan planCopy = plan;
+        planCopy.trips[sourceIt->tripIndex] = sourceCopy;
+        planCopy.trips[targetIt->tripIndex] = targetCopy;
 
-        bool valid = (new_dist_s <= heli.distance_capacity) &&
-                     (new_dist_t <= heli.distance_capacity) &&
-                     (new_heli_total <= problemData.d_max) &&
-                     (new_weight_s <= heli.weight_capacity) &&
-                     (new_weight_t <= heli.weight_capacity);
-
-        if (valid) {
-            double delta_cost = heli.alpha * delta_dist;
-            double delta_obj = -delta_cost;
-            if (!improve_only || delta_obj > 0) {
-                return movedPlans;
-            }
+        if (!validate_plan_for_heli(planCopy, problemData)) {
+            continue;
         }
-        // Revert if not accepted
-        targetTrip.drops.pop_back();
-        sourceTrip.drops.insert(sourceTrip.drops.begin() + dropIndex, std::move(selectedDrop));
-        sourceTrip.dry_food_pickup += df;
-        sourceTrip.perishable_food_pickup += pf;
-        sourceTrip.other_supplies_pickup += os;
-        targetTrip.dry_food_pickup -= df;
-        targetTrip.perishable_food_pickup -= pf;
-        targetTrip.other_supplies_pickup -= os;
+
+        movedPlans[heliIndex] = planCopy;
+        bool valid;
+        double obj = compute_objective(movedPlans, problemData, &valid);
+        if (valid && (!improve_only || obj > current_obj)) {
+            //std::cout<<obj<<" "<<current_obj<<std::endl;
+             ////std::cout<<"cmae :: move_visits"<<std::endl;
+            return movedPlans;
+        } else {
+            continue;
+        }
     }
     return HelicopterPlans;
 }
 
+// -------- split_trip (copy-based) -----------
 Solution split_trip(const Solution &sol, const ProblemData &problemData,
                     double current_obj, bool improve_only = true) {
     std::random_device rd;
@@ -562,92 +534,55 @@ Solution split_trip(const Solution &sol, const ProblemData &problemData,
 
     for (int attempt = 0; attempt < 10; ++attempt) {
         Solution neighbor = sol;
-        if (neighbor.empty())
-            continue;
+        if (neighbor.empty()) continue;
 
         std::uniform_int_distribution<size_t> h_dist(0, neighbor.size() - 1);
         size_t h_idx = h_dist(gen);
         auto &plan = neighbor[h_idx];
-
-        if (plan.trips.empty())
-            continue;
+        if (plan.trips.empty()) continue;
 
         std::uniform_int_distribution<size_t> t_dist(0, plan.trips.size() - 1);
         size_t t_idx = t_dist(gen);
-        auto &trip = plan.trips[t_idx];
-
-        if (trip.drops.size() <= 1)
-            continue;
-
-        const Helicopter &heli =
-            problemData.helicopters[plan.helicopter_id - 1];
-        const Point home = problemData.cities[heli.home_city_id - 1];
-
-        double heli_total_dist = 0.0;
-        for (const auto &tr : plan.trips) {
-            heli_total_dist += compute_trip_dist(tr, home, problemData);
-        }
-
-        double old_dist = compute_trip_dist(trip, home, problemData);
+        Trip trip = plan.trips[t_idx];
+        if (trip.drops.size() <= 1) continue;
 
         std::uniform_int_distribution<size_t> d_dist(0, trip.drops.size() - 1);
         size_t d_idx = d_dist(gen);
 
-        Drop d = std::move(trip.drops[d_idx]);
-        trip.drops.erase(trip.drops.begin() + d_idx);
+        if (d_idx >= trip.drops.size()) continue;
 
-        trip.dry_food_pickup -= d.dry_food;
-        trip.perishable_food_pickup -= d.perishable_food;
-        trip.other_supplies_pickup -= d.other_supplies;
+        Trip tripCopy = trip;
+        Drop d = tripCopy.drops[d_idx];
+        tripCopy.drops.erase(tripCopy.drops.begin() + d_idx);
+        tripCopy.dry_food_pickup -= d.dry_food;
+        tripCopy.perishable_food_pickup -= d.perishable_food;
+        tripCopy.other_supplies_pickup -= d.other_supplies;
 
         Trip newTrip;
         newTrip.dry_food_pickup = d.dry_food;
         newTrip.perishable_food_pickup = d.perishable_food;
         newTrip.other_supplies_pickup = d.other_supplies;
-        newTrip.drops.push_back(std::move(d));
+        newTrip.drops.push_back(d);
 
-        plan.trips.push_back(std::move(newTrip));
+        HelicopterPlan planCopy = plan;
+        planCopy.trips[t_idx] = tripCopy;
+        planCopy.trips.push_back(newTrip);
 
-        double new_old_dist = compute_trip_dist(trip, home, problemData);
-        double new_trip_dist =
-            compute_trip_dist(plan.trips.back(), home, problemData);
-        double delta_dist = new_old_dist + new_trip_dist - old_dist;
-        double new_heli_total = heli_total_dist + delta_dist;
+        if (!validate_plan_for_heli(planCopy, problemData)) continue;
 
-        double new_old_weight =
-            trip.dry_food_pickup * problemData.packages[0].weight +
-            trip.perishable_food_pickup * problemData.packages[1].weight +
-            trip.other_supplies_pickup * problemData.packages[2].weight;
-        double new_trip_weight =
-            plan.trips.back().dry_food_pickup * problemData.packages[0].weight +
-            plan.trips.back().perishable_food_pickup *
-                problemData.packages[1].weight +
-            plan.trips.back().other_supplies_pickup *
-                problemData.packages[2].weight;
-
-        bool valid = (new_old_dist <= heli.distance_capacity) &&
-                     (new_trip_dist <= heli.distance_capacity) &&
-                     (new_heli_total <= problemData.d_max) &&
-                     (new_old_weight <= heli.weight_capacity) &&
-                     (new_trip_weight <= heli.weight_capacity);
-
-        if (valid) {
-            double delta_cost = heli.fixed_cost + heli.alpha * delta_dist;
-            double delta_obj = -delta_cost;
-            if (!improve_only || delta_obj > 0) {
-                return neighbor;
-            }
+        neighbor[h_idx] = planCopy;
+        bool valid;
+        double obj = compute_objective(neighbor, problemData, &valid);
+        if (valid && (!improve_only || obj > current_obj)) {
+            //std::cout<<obj<<" "<<current_obj<<std::endl;
+             ////std::cout<<"cmae :: split_trip"<<std::endl;
+            return neighbor;
         }
-        // Revert if not accepted
-        plan.trips.pop_back();
-        trip.drops.insert(trip.drops.begin() + d_idx, std::move(d));
-        trip.dry_food_pickup += d.dry_food;
-        trip.perishable_food_pickup += d.perishable_food;
-        trip.other_supplies_pickup += d.other_supplies;
     }
     return sol;
 }
 
+// -------- merge_trips (copy-based) ---------
 Solution merge_trips(const Solution &sol, const ProblemData &problemData,
                      double current_obj, bool improve_only = true) {
     std::random_device rd;
@@ -669,11 +604,6 @@ Solution merge_trips(const Solution &sol, const ProblemData &problemData,
             problemData.helicopters[plan.helicopter_id - 1];
         const Point home = problemData.cities[heli.home_city_id - 1];
 
-        double heli_total_dist = 0.0;
-        for (const auto &tr : plan.trips) {
-            heli_total_dist += compute_trip_dist(tr, home, problemData);
-        }
-
         std::uniform_int_distribution<size_t> t_dist(0, plan.trips.size() - 1);
         size_t t1 = t_dist(gen);
         size_t t2 = t_dist(gen);
@@ -686,11 +616,10 @@ Solution merge_trips(const Solution &sol, const ProblemData &problemData,
         if (t1 == t2)
             continue;
 
-        auto &trip1 = plan.trips[t1];
-        auto &trip2 = plan.trips[t2];
+        if (t1 > t2) std::swap(t1, t2);
 
-        double old_dist1 = compute_trip_dist(trip1, home, problemData);
-        double old_dist2 = compute_trip_dist(trip2, home, problemData);
+        auto trip1 = plan.trips[t1]; // copy
+        auto trip2 = plan.trips[t2];
 
         Trip merged;
         merged.dry_food_pickup = trip1.dry_food_pickup + trip2.dry_food_pickup;
@@ -699,42 +628,27 @@ Solution merge_trips(const Solution &sol, const ProblemData &problemData,
         merged.other_supplies_pickup =
             trip1.other_supplies_pickup + trip2.other_supplies_pickup;
 
-        merged.drops = std::move(trip1.drops);
+        merged.drops = std::move(plan.trips[t1].drops);
         merged.drops.insert(merged.drops.end(),
-                            std::make_move_iterator(trip2.drops.begin()),
-                            std::make_move_iterator(trip2.drops.end()));
+                            std::make_move_iterator(plan.trips[t2].drops.begin()),
+                            std::make_move_iterator(plan.trips[t2].drops.end()));
 
-        double merged_dist = compute_trip_dist(merged, home, problemData);
+        HelicopterPlan planCopy = plan;
+        planCopy.trips.erase(planCopy.trips.begin() + t2);
+        planCopy.trips.erase(planCopy.trips.begin() + t1);
+        planCopy.trips.push_back(merged);
 
-        size_t max_idx = std::max(t1, t2);
-        size_t min_idx = std::min(t1, t2);
-        plan.trips.erase(plan.trips.begin() + max_idx);
-        plan.trips.erase(plan.trips.begin() + min_idx);
-        plan.trips.push_back(std::move(merged));
+        if (!validate_plan_for_heli(planCopy, problemData)) continue;
 
-        double delta_dist = merged_dist - (old_dist1 + old_dist2);
-        double new_heli_total = heli_total_dist + delta_dist;
+        neighbor[h_idx] = planCopy;
+        bool valid;
+        double obj = compute_objective(neighbor, problemData, &valid);
+        if (valid && (!improve_only || obj > current_obj)) {
+            //cout<<obj<<" "<<current_obj<<std::endl;
+            return neighbor;
 
-        double merged_weight =
-            merged.dry_food_pickup * problemData.packages[0].weight +
-            merged.perishable_food_pickup * problemData.packages[1].weight +
-            merged.other_supplies_pickup * problemData.packages[2].weight;
-
-        bool valid = (merged_dist <= heli.distance_capacity) &&
-                     (new_heli_total <= problemData.d_max) &&
-                     (merged_weight <= heli.weight_capacity);
-
-        if (valid) {
-            double delta_cost = -heli.fixed_cost + heli.alpha * delta_dist;
-            double delta_obj = -delta_cost;
-            if (!improve_only || delta_obj > 0) {
-                return neighbor;
-            }
+             ////std::cout<<"cmae :: merge_trips"<<std::endl;
         }
-        // Revert if not accepted
-        plan.trips.pop_back();
-        plan.trips.insert(plan.trips.begin() + min_idx, std::move(trip1));
-        plan.trips.insert(plan.trips.begin() + max_idx, std::move(trip2));
     }
     return sol;
 }
@@ -786,7 +700,8 @@ Solution reassign_visit(const Solution &sol, const ProblemData &problemData,
         srcTrip.perishable_food_pickup -= d.perishable_food;
         srcTrip.other_supplies_pickup -= d.other_supplies;
 
-        if (srcTrip.drops.empty()) {
+        bool src_trip_empty = srcTrip.drops.empty();
+        if (src_trip_empty) {
             planFrom.trips.erase(planFrom.trips.begin() + t_idx);
         }
 
@@ -821,24 +736,26 @@ Solution reassign_visit(const Solution &sol, const ProblemData &problemData,
         double new_dst_dist = 0.0;
         double new_dst_heli_total = 0.0;
         double delta_cost = 0.0;
+        size_t t_to = 0;
+        size_t insert_pos = 0;
+        bool new_trip_added = false;
 
         if (append_existing) {
             std::uniform_int_distribution<size_t> t_to_dist(
                 0, planTo.trips.size() - 1);
-            size_t t_to = t_to_dist(gen);
+            t_to = t_to_dist(gen);
             auto &dstTrip = planTo.trips[t_to];
 
             double old_dist_dst =
                 compute_trip_dist(dstTrip, dst_home, problemData);
 
-            size_t insert_pos = 0;
             if (!dstTrip.drops.empty()) {
                 std::uniform_int_distribution<size_t> pos_dist(
                     0, dstTrip.drops.size());
                 insert_pos = pos_dist(gen);
             }
             dstTrip.drops.insert(dstTrip.drops.begin() + insert_pos,
-                                 std::move(d));
+                                 Drop{d.village_id, d.dry_food, d.perishable_food, d.other_supplies});
 
             dstTrip.dry_food_pickup += d.dry_food;
             dstTrip.perishable_food_pickup += d.perishable_food;
@@ -854,33 +771,40 @@ Solution reassign_visit(const Solution &sol, const ProblemData &problemData,
                 dstTrip.other_supplies_pickup * problemData.packages[2].weight;
             delta_cost = dst_heli.alpha * delta_dist_dst +
                          src_heli.alpha * delta_dist_src;
+            if (src_trip_empty) {
+                delta_cost -= src_heli.fixed_cost; // Removed a trip
+            }
         } else {
             Trip newTrip;
             newTrip.dry_food_pickup = d.dry_food;
             newTrip.perishable_food_pickup = d.perishable_food;
             newTrip.other_supplies_pickup = d.other_supplies;
-            newTrip.drops.push_back(std::move(d));
-            planTo.trips.push_back(std::move(newTrip));
+            newTrip.drops.push_back(Drop{d.village_id, d.dry_food, d.perishable_food, d.other_supplies});
+            planTo.trips.push_back(newTrip);
+            new_trip_added = true;
             new_dst_dist =
                 compute_trip_dist(planTo.trips.back(), dst_home, problemData);
             delta_dist_dst = new_dst_dist;
             new_dst_heli_total = dst_heli_total_dist + delta_dist_dst;
             new_dst_weight =
-                newTrip.dry_food_pickup * problemData.packages[0].weight +
-                newTrip.perishable_food_pickup *
+                planTo.trips.back().dry_food_pickup * problemData.packages[0].weight +
+                planTo.trips.back().perishable_food_pickup *
                     problemData.packages[1].weight +
-                newTrip.other_supplies_pickup * problemData.packages[2].weight;
+                planTo.trips.back().other_supplies_pickup * problemData.packages[2].weight;
             delta_cost = dst_heli.fixed_cost + dst_heli.alpha * delta_dist_dst +
                          src_heli.alpha * delta_dist_src;
+            if (src_trip_empty) {
+                delta_cost -= src_heli.fixed_cost; // Removed a trip
+            }
         }
 
+        double new_src_dist = compute_trip_dist(srcTrip, src_home, problemData);
         double new_src_weight =
             srcTrip.dry_food_pickup * problemData.packages[0].weight +
             srcTrip.perishable_food_pickup * problemData.packages[1].weight +
             srcTrip.other_supplies_pickup * problemData.packages[2].weight;
 
-        bool valid = (compute_trip_dist(srcTrip, src_home, problemData) <=
-                      src_heli.distance_capacity) &&
+        bool valid = (new_src_dist <= src_heli.distance_capacity) &&
                      (new_dst_dist <= dst_heli.distance_capacity) &&
                      (new_src_heli_total <= problemData.d_max) &&
                      (new_dst_heli_total <= problemData.d_max) &&
@@ -890,12 +814,279 @@ Solution reassign_visit(const Solution &sol, const ProblemData &problemData,
         if (valid) {
             double delta_obj = -delta_cost;
             if (!improve_only || delta_obj > 0) {
+                //cout<<current_obj + delta_obj<<" "<<current_obj<<std::endl;
+                 ////std::cout<<"cmae :: reassign_visit"<<std::endl;
                 return neighbor;
             }
         }
-        // Revert changes if not accepted (code for revert would be similar but opposite operations)
+
+        // Revert
+        if (append_existing) {
+            auto &dstTrip = planTo.trips[t_to];
+            dstTrip.drops.erase(dstTrip.drops.begin() + insert_pos);
+            dstTrip.dry_food_pickup -= d.dry_food;
+            dstTrip.perishable_food_pickup -= d.perishable_food;
+            dstTrip.other_supplies_pickup -= d.other_supplies;
+        } else if (new_trip_added) {
+            planTo.trips.pop_back();
+        }
+        if (src_trip_empty) {
+            planFrom.trips.insert(planFrom.trips.begin() + t_idx, srcTrip);
+        }
+        auto &revertedSrcTrip = src_trip_empty ? planFrom.trips[t_idx] : srcTrip;
+        revertedSrcTrip.drops.insert(revertedSrcTrip.drops.begin() + d_idx, std::move(d));
+        revertedSrcTrip.dry_food_pickup += d.dry_food;
+        revertedSrcTrip.perishable_food_pickup += d.perishable_food;
+        revertedSrcTrip.other_supplies_pickup += d.other_supplies;
     }
     return sol;
+}
+
+Solution add_new_village(const Solution &HelicopterPlans,
+                         const ProblemData &problemData, double current_obj,
+                         bool improve_only = true) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        Solution addedPlans = HelicopterPlans;
+        if (addedPlans.empty()) continue;
+
+        auto village_delivered = compute_village_delivered(HelicopterPlans, problemData);
+
+        std::vector<size_t> underserved;
+        for (size_t v = 0; v < problemData.villages.size(); ++v) {
+            double current_val = compute_village_value(village_delivered[v], problemData, problemData.villages[v].population);
+            double max_val = compute_max_village_value(problemData, problemData.villages[v].population);
+            if (current_val < max_val) underserved.push_back(v);
+        }
+        if (underserved.empty()) continue;
+
+        std::uniform_int_distribution<size_t> heli_dist(0, addedPlans.size() - 1);
+        size_t h = heli_dist(gen);
+        auto &plan = addedPlans[h];
+        if (plan.trips.empty()) continue;
+
+        std::uniform_int_distribution<size_t> t_dist(0, plan.trips.size() - 1);
+        size_t t = t_dist(gen);
+        auto trip = plan.trips[t];
+        if (trip.drops.empty()) continue;
+
+        std::uniform_int_distribution<size_t> pos_dist(0, trip.drops.size());
+        size_t insert_pos = pos_dist(gen);
+        std::uniform_int_distribution<size_t> u_dist(0, underserved.size() - 1);
+        size_t u_idx = u_dist(gen);
+        int new_vid = static_cast<int>(underserved[u_idx]) + 1; // 1-based
+
+        bool already_in_trip = false;
+        for (const auto &drop : trip.drops) if (drop.village_id == new_vid) { already_in_trip = true; break; }
+        if (already_in_trip) continue;
+
+        Trip tripCopy = trip;
+        tripCopy.drops.insert(tripCopy.drops.begin() + insert_pos, Drop{new_vid, 0, 0, 0});
+
+        double new_dist = compute_trip_dist(tripCopy, problemData.cities[problemData.helicopters[plan.helicopter_id - 1].home_city_id - 1], problemData);
+        if (new_dist > problemData.helicopters[plan.helicopter_id - 1].distance_capacity) continue;
+
+        std::uniform_real_distribution<double> factor_dist(0.1, 0.9);
+        double donationFactor = factor_dist(gen);
+
+        std::vector<Drop> old_drops = tripCopy.drops;
+        std::map<int, std::array<int, 3>> old_contrib;
+        for (const auto &drop : old_drops) {
+            auto &c = old_contrib[drop.village_id];
+            c[0] += drop.dry_food;
+            c[1] += drop.perishable_food;
+            c[2] += drop.other_supplies;
+        }
+
+        int totalDonationFood = 0;
+        std::vector<int> donationFood(tripCopy.drops.size(), 0);
+        for (size_t i = 0; i < tripCopy.drops.size(); ++i) {
+            if (i == insert_pos) continue;
+            int currentFood = tripCopy.drops[i].dry_food + tripCopy.drops[i].perishable_food;
+            int donate = static_cast<int>(donationFactor * currentFood);
+            donationFood[i] = donate;
+            totalDonationFood += donate;
+        }
+
+        int newCapFood = problemData.villages[new_vid - 1].population * 9;
+        int currentNewFood = tripCopy.drops[insert_pos].dry_food + tripCopy.drops[insert_pos].perishable_food;
+        int gapFood = std::max(0, newCapFood - currentNewFood);
+        int actualDonationFood = std::min(totalDonationFood, gapFood);
+
+        bool changed = false;
+        if (actualDonationFood > 0 && totalDonationFood > 0) {
+            for (size_t i = 0; i < tripCopy.drops.size(); ++i) {
+                if (i == insert_pos) continue;
+                if (donationFood[i] > 0) {
+                    int removal = static_cast<int>(std::round(
+                        donationFood[i] * (actualDonationFood / static_cast<double>(totalDonationFood))));
+                    int currentFood = tripCopy.drops[i].dry_food + tripCopy.drops[i].perishable_food;
+                    if (currentFood > 0) {
+                        double ratioDry = tripCopy.drops[i].dry_food / static_cast<double>(currentFood);
+                        int removeDry = static_cast<int>(std::round(removal * ratioDry));
+                        int removePerc = removal - removeDry;
+                        tripCopy.drops[i].dry_food = std::max(0, tripCopy.drops[i].dry_food - removeDry);
+                        tripCopy.drops[i].perishable_food = std::max(0, tripCopy.drops[i].perishable_food - removePerc);
+                        changed = true;
+                    }
+                }
+            }
+            if (currentNewFood > 0) {
+                double ratioDryNew = tripCopy.drops[insert_pos].dry_food / static_cast<double>(currentNewFood);
+                int addDry = static_cast<int>(std::round(actualDonationFood * ratioDryNew));
+                int addPerc = actualDonationFood - addDry;
+                tripCopy.drops[insert_pos].dry_food += addDry;
+                tripCopy.drops[insert_pos].perishable_food += addPerc;
+            } else {
+                tripCopy.drops[insert_pos].perishable_food += actualDonationFood;
+            }
+        }
+
+        int totalDonationOther = 0;
+        std::vector<int> donationOther(tripCopy.drops.size(), 0);
+        for (size_t i = 0; i < tripCopy.drops.size(); ++i) {
+            if (i == insert_pos) continue;
+            int currentOther = tripCopy.drops[i].other_supplies;
+            int donate = static_cast<int>(donationFactor * currentOther);
+            donationOther[i] = donate;
+            totalDonationOther += donate;
+        }
+        int newCapOther = problemData.villages[new_vid - 1].population * 1;
+        int currentNewOther = tripCopy.drops[insert_pos].other_supplies;
+        int gapOther = std::max(0, newCapOther - currentNewOther);
+        int actualDonationOther = std::min(totalDonationOther, gapOther);
+
+        if (actualDonationOther > 0 && totalDonationOther > 0) {
+            for (size_t i = 0; i < tripCopy.drops.size(); ++i) {
+                if (i == insert_pos) continue;
+                if (donationOther[i] > 0) {
+                    int removal = static_cast<int>(std::round(donationOther[i] * (actualDonationOther / static_cast<double>(totalDonationOther))));
+                    tripCopy.drops[i].other_supplies = std::max(0, tripCopy.drops[i].other_supplies - removal);
+                    changed = true;
+                }
+            }
+            tripCopy.drops[insert_pos].other_supplies += actualDonationOther;
+        }
+
+        if (!changed) {
+            continue;
+        }
+
+        tripCopy.dry_food_pickup = 0;
+        tripCopy.perishable_food_pickup = 0;
+        tripCopy.other_supplies_pickup = 0;
+        for (const auto &drop : tripCopy.drops) {
+            tripCopy.dry_food_pickup += drop.dry_food;
+            tripCopy.perishable_food_pickup += drop.perishable_food;
+            tripCopy.other_supplies_pickup += drop.other_supplies;
+        }
+
+        HelicopterPlan planCopy = plan;
+        planCopy.trips[t] = tripCopy;
+        if (!validate_plan_for_heli(planCopy, problemData)) {
+            continue;
+        }
+
+        addedPlans[h] = planCopy;
+        bool valid;
+        double obj = compute_objective(addedPlans, problemData, &valid);
+        if (valid && (!improve_only || obj > current_obj)) {
+            //std::cout<<obj<<" "<<current_obj<<std::endl;
+            ////std::cout<<"cmae :: add_new_village"<<std::endl;
+            return addedPlans;
+        } else {
+            continue;
+        }
+    }
+    return HelicopterPlans;
+}
+
+// -------- remove_village (copy-based) ----------
+Solution remove_village(const Solution &HelicopterPlans,
+                        const ProblemData &problemData, double current_obj,
+                        bool improve_only = true) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        Solution removedPlans = HelicopterPlans;
+        if (removedPlans.empty()) continue;
+
+        std::uniform_int_distribution<size_t> h_dist(0, removedPlans.size() - 1);
+        size_t h = h_dist(gen);
+        auto &plan = removedPlans[h];
+        if (plan.trips.empty()) continue;
+
+        std::uniform_int_distribution<size_t> t_dist(0, plan.trips.size() - 1);
+        size_t t = t_dist(gen);
+        auto trip = plan.trips[t];
+
+        if (trip.drops.size() < 2) continue;
+
+        std::uniform_int_distribution<size_t> d_dist(0, trip.drops.size() - 1);
+        size_t remove_idx = d_dist(gen);
+
+        Trip tripCopy = trip;
+        Drop removed_drop = tripCopy.drops[remove_idx];
+        tripCopy.drops.erase(tripCopy.drops.begin() + remove_idx);
+
+        int df_to_redist = removed_drop.dry_food;
+        int pf_to_redist = removed_drop.perishable_food;
+        int os_to_redist = removed_drop.other_supplies;
+
+        std::vector<size_t> candidates;
+        for (size_t i = 0; i < tripCopy.drops.size(); ++i) {
+            int vid = tripCopy.drops[i].village_id - 1;
+            int current_food = 0;
+            for (const auto &pl : HelicopterPlans) {
+                for (const auto &tr : pl.trips) {
+                    for (const auto &dp : tr.drops) {
+                        if (dp.village_id - 1 == vid) {
+                            current_food += dp.dry_food + dp.perishable_food;
+                        }
+                    }
+                }
+            }
+            int cap_food = problemData.villages[vid].population * 9;
+            if (current_food < cap_food) candidates.push_back(i);
+        }
+
+        if (!candidates.empty()) {
+            std::uniform_int_distribution<size_t> c_dist(0, candidates.size() - 1);
+            size_t target_idx = candidates[c_dist(gen)];
+            tripCopy.drops[target_idx].dry_food += df_to_redist;
+            tripCopy.drops[target_idx].perishable_food += pf_to_redist;
+            tripCopy.drops[target_idx].other_supplies += os_to_redist;
+        }
+
+        tripCopy.dry_food_pickup = 0;
+        tripCopy.perishable_food_pickup = 0;
+        tripCopy.other_supplies_pickup = 0;
+        for (const auto &drop : tripCopy.drops) {
+            tripCopy.dry_food_pickup += drop.dry_food;
+            tripCopy.perishable_food_pickup += drop.perishable_food;
+            tripCopy.other_supplies_pickup += drop.other_supplies;
+        }
+
+        HelicopterPlan planCopy = plan;
+        planCopy.trips[t] = tripCopy;
+
+        if (!validate_plan_for_heli(planCopy, problemData)) {
+            continue;
+        }
+
+        removedPlans[h] = planCopy;
+        bool valid;
+        double obj = compute_objective(removedPlans, problemData, &valid);
+        if (valid && (!improve_only || obj > current_obj)) {
+            //std::cout<<obj<<" "<<current_obj<<std::endl;
+                ////std::cout<<"cmae :: remove_village"<<std::endl;
+            return removedPlans;
+        }
+    }
+    return HelicopterPlans;
 }
 
 Solution get_best_neighbor(const Solution &HelicopterPlans,
@@ -918,6 +1109,8 @@ Solution get_best_neighbor(const Solution &HelicopterPlans,
     update_best(split_trip(HelicopterPlans, problemData, current_obj, true));
     update_best(merge_trips(HelicopterPlans, problemData, current_obj, true));
     update_best(reassign_visit(HelicopterPlans, problemData, current_obj, true));
+    update_best(add_new_village(HelicopterPlans, problemData, current_obj, true));
+    update_best(remove_village(HelicopterPlans, problemData, current_obj, true));
 
     return best;
 }
@@ -926,9 +1119,10 @@ Solution get_random_neighbor(const Solution &HelicopterPlans,
                              const ProblemData &problemData, double current_obj) {
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_int_distribution<int> op_dist(0, 5);
+    std::vector<double> weights = {10, 8, 6, 5, 4, 3, 10, 5};
+    std::discrete_distribution<int> op_dist(weights.begin(), weights.end());
     int op = op_dist(gen);
-
+    ////std::cout<<"op :: "<<op<<std::endl;
     switch (op) {
     case 0:
         return reorder_visits(HelicopterPlans, problemData, current_obj, false);
@@ -942,6 +1136,10 @@ Solution get_random_neighbor(const Solution &HelicopterPlans,
         return merge_trips(HelicopterPlans, problemData, current_obj, false);
     case 5:
         return reassign_visit(HelicopterPlans, problemData, current_obj, false);
+    case 6:
+        return add_new_village(HelicopterPlans, problemData, current_obj, false);
+    case 7:
+        return remove_village(HelicopterPlans, problemData, current_obj, false);
     default:
         return HelicopterPlans;
     }
